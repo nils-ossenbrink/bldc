@@ -75,6 +75,7 @@
  * Select default user app configuration
  */
 //#include			"appconf_example_ppm.h"
+#define APP_CUSTOM_TO_USE			"app_dual_adc_plaus.c"
 //#include			"appconf_custom.h"
 
 /*
