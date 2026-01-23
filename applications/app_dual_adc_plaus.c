@@ -31,12 +31,12 @@
 // ---------------------- User configuration ----------------------
 
 // Expected joystick channel range (on the ESC ADC pins, in volts)
-#define V_MIN           0.50f
-#define V_MAX           2.50f
+#define V_MIN           0.32f
+#define V_MAX           2.69f
 
 // Complementary-sum plausibility target and tolerance (in volts)
-#define SUM_TARGET_V    3.00f   // If you truly need 1.50 V, change here
-#define SUM_TOL_V       0.15f   // ±150 mV window
+#define SUM_TARGET_V    1.53f   // If you truly need 1.50 V, change here
+#define SUM_TOL_V       0.2f   // ±200 mV window
 
 // Extra window margin per channel (in volts)
 #define V_MARGIN        0.05f
