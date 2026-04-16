@@ -76,8 +76,8 @@ typedef struct {
     float alpha;          // [-] low-pass filter weight (0..1)
     float i_max;          // [A] max torque (current) at |pos|=1
     float brake_on_fault; // [A] if >0, active brake on fault
-    uint16_t clear_time_ok_ms;  // ms inputs must be OK to clear latched fault
-    uint16_t loop_period_ms;    // main loop period (1..20 ms typical)
+    int32_t clear_time_ok_ms;  // ms inputs must be OK to clear latched fault
+    int32_t  loop_period_ms;    // main loop period (1..20 ms typical)
 } dualadc_cfg_t;
 
 static void cfg_load_defaults(dualadc_cfg_t *c) {
@@ -85,16 +85,16 @@ static void cfg_load_defaults(dualadc_cfg_t *c) {
     c->v_center        = 1.53f;
     c->v_max           = 2.69f;
 
-    c->deadband        = 0.03f;
+    c->deadband        = 0.2f;
 
     // If your sensors are truly complementary across the whole range,
     // sum should be ~ v_min + v_max. Adjust if your hardware differs.
-    c->sum_target      = 3.00f;    // e.g. 0.50 + 2.50
+    c->sum_target      = 2.92f;    // e.g. 0.50 + 2.50
     c->sum_tol         = 0.3f;
 
     c->v_margin        = 0.05f;
     c->alpha           = 0.12f;
-    c->i_max           = 50.0f;
+    c->i_max           = 3.0f;
     c->brake_on_fault  = 0.0f;
 
     c->clear_time_ok_ms = 50;
@@ -188,31 +188,33 @@ static bool my_set_cfg(uint8_t *data) {
     return true;
 }
 
-// Provide the XML UI schema that VESC Tool will render
+static volatile bool   m_custom_xml_read = false;
+
 static int my_get_cfg_xml(uint8_t **data) {
+    commands_printf("DEBUG: XML config requested by Tool"); 
+    m_custom_xml_read = true;
+
     static const char xml[] =
         "<?xml version=\"1.0\" encoding=\"UTF-8\"?>"
-        "<ConfigParams><Params>"
-          "<v_min><longName>ADC Min [V]</longName><type>1</type><editorDecimalsDouble>2</editorDecimalsDouble></v_min>"
-          "<v_center><longName>ADC Center [V]</longName><type>1</type><editorDecimalsDouble>2</editorDecimalsDouble></v_center>"
-          "<v_max><longName>ADC Max [V]</longName><type>1</type><editorDecimalsDouble>2</editorDecimalsDouble></v_max>"
-
-          "<deadband><longName>Deadband [-]</longName><type>1</type><editorDecimalsDouble>3</editorDecimalsDouble></deadband>"
-
-          "<sum_target><longName>Plausibility Sum Target [V]</longName><type>1</type><editorDecimalsDouble>3</editorDecimalsDouble></sum_target>"
-          "<sum_tol><longName>Plausibility Sum Tolerance [V]</longName><type>1</type><editorDecimalsDouble>3</editorDecimalsDouble></sum_tol>"
-          "<v_margin><longName>Per-Channel Margin [V]</longName><type>1</type><editorDecimalsDouble>3</editorDecimalsDouble></v_margin>"
-
-          "<alpha><longName>Filter Alpha</longName><type>1</type><editorDecimalsDouble>3</editorDecimalsDouble></alpha>"
-          "<i_max><longName>Max Current [A]</longName><type>1</type><editorDecimalsDouble>1</editorDecimalsDouble></i_max>"
-          "<brake_on_fault><longName>Brake on Fault [A]</longName><type>1</type><editorDecimalsDouble>1</editorDecimalsDouble></brake_on_fault>"
-
-          "<clear_time_ok_ms><longName>Clear Time OK [ms]</longName><type>0</type></clear_time_ok_ms>"
-          "<loop_period_ms><longName>Loop Period [ms]</longName><type>0</type></loop_period_ms>"
-        "</Params></ConfigParams>";
+        "<ConfigParams name=\"DualADCJoystick\">"
+        "<Params>"
+        " <v_min><longName>ADC Min</longName><type>1</type><editorDecimalsDouble>2</editorDecimalsDouble><stepDouble>0.01</stepDouble><minDouble>0</minDouble><maxDouble>5</maxDouble></v_min>"
+        " <v_center><longName>ADC Center</longName><type>1</type><editorDecimalsDouble>2</editorDecimalsDouble><stepDouble>0.01</stepDouble><minDouble>0</minDouble><maxDouble>5</maxDouble></v_center>"
+        " <v_max><longName>ADC Max</longName><type>1</type><editorDecimalsDouble>2</editorDecimalsDouble><stepDouble>0.01</stepDouble><minDouble>0</minDouble><maxDouble>5</maxDouble></v_max>"
+        " <deadband><longName>Deadband</longName><type>1</type><editorDecimalsDouble>3</editorDecimalsDouble><stepDouble>0.001</stepDouble><minDouble>0</minDouble><maxDouble>1</maxDouble></deadband>"
+        " <sum_target><longName>Sum Target</longName><type>1</type><editorDecimalsDouble>3</editorDecimalsDouble><stepDouble>0.01</stepDouble><minDouble>0</minDouble><maxDouble>10</maxDouble></sum_target>"
+        " <sum_tol><longName>Sum Tol</longName><type>1</type><editorDecimalsDouble>3</editorDecimalsDouble><stepDouble>0.01</stepDouble><minDouble>0</minDouble><maxDouble>5</maxDouble></sum_tol>"
+        " <v_margin><longName>Margin</longName><type>1</type><editorDecimalsDouble>3</editorDecimalsDouble><stepDouble>0.001</stepDouble><minDouble>0</minDouble><maxDouble>5</maxDouble></v_margin>"
+        " <alpha><longName>Alpha</longName><type>1</type><editorDecimalsDouble>3</editorDecimalsDouble><stepDouble>0.001</stepDouble><minDouble>0</minDouble><maxDouble>1</maxDouble></alpha>"
+        " <i_max><longName>Max Current</longName><type>1</type><editorDecimalsDouble>1</editorDecimalsDouble><stepDouble>0.1</stepDouble><minDouble>0</minDouble><maxDouble>300</maxDouble></i_max>"
+        " <brake_on_fault><longName>Brake Fault</longName><type>1</type><editorDecimalsDouble>1</editorDecimalsDouble><stepDouble>0.1</stepDouble><minDouble>0</minDouble><maxDouble>300</maxDouble></brake_on_fault>"
+        " <clear_time_ok_ms><longName>Clear Time ms</longName><type>0</type><step>1</step><min>0</min><max>10000</max></clear_time_ok_ms>"
+        " <loop_period_ms><longName>Loop Period ms</longName><type>0</type><step>1</step><min>1</min><max>1000</max></loop_period_ms>"
+        "</Params>"
+        "</ConfigParams>";
 
     *data = (uint8_t*)xml;
-    return (int)strlen(xml) + 1; // include NUL
+    return strlen(xml) + 1;
 }
 
 // ---------------------- Internal state --------------------------
@@ -298,6 +300,9 @@ static THD_FUNCTION(dual_adc_thread, arg) {
         uint16_t r1 = ADC_Value[ADC1_IDX];
         uint16_t r2 = ADC_Value[ADC2_IDX];
 
+         // loop timing
+        const uint16_t lp = (g_cfg.loop_period_ms > 0) ? g_cfg.loop_period_ms : 2;
+
         // Convert to volts
         float v1 = adc_to_volt(r1);
         float v2 = adc_to_volt(r2);
@@ -315,6 +320,7 @@ static THD_FUNCTION(dual_adc_thread, arg) {
                 float pos = norm_pos(v1, v2);
                 // low-pass filter position
                 m_pos_f = m_pos_f + g_cfg.alpha * (pos - m_pos_f);
+                //mc_interface_set_duty(m_pos_f);
                 mc_interface_set_current(m_pos_f * g_cfg.i_max);
             } else {
                 // Fault latched; require sustained OK before clearing
@@ -330,8 +336,6 @@ static THD_FUNCTION(dual_adc_thread, arg) {
         // Keep the firmware watchdog happy
         timeout_reset();
 
-        // loop timing
-        const uint16_t lp = (g_cfg.loop_period_ms > 0) ? g_cfg.loop_period_ms : 2;
         ts += MS2ST(lp);
         chThdSleepUntilWindowed(ts, ts + MS2ST(lp));
     }
@@ -346,11 +350,19 @@ static void terminal_cmd_dual_adc(int argc, const char **argv) {
     float v1  = m_v1;
     float v2  = m_v2;
     float sum = m_sum;
+    float pos = m_pos_f;
 
     commands_printf("Dual-ADC status:");
     commands_printf("  v1:  %.3f V", (double)v1);
     commands_printf("  v2:  %.3f V", (double)v2);
     commands_printf("  sum: %.3f V", (double)sum);
+    commands_printf("  pos: %.3f V", (double)m_pos_f);
+    if (m_custom_xml_read) {
+        commands_printf("  Custom_xml_read successfully");
+    }
+    else {
+        commands_printf("  Custom_xml_ not read");
+    }
     commands_printf("  fault_latched: %d", m_fault_latched ? 1 : 0);
 
     if (argc >= 2 && strcmp(argv[1], "stream") == 0) {
@@ -374,11 +386,30 @@ static void terminal_cmd_dual_adc(int argc, const char **argv) {
             v1  = m_v1;
             v2  = m_v2;
             sum = m_sum;
-            commands_printf("v1=%.3f  v2=%.3f  sum=%.3f  fault=%d",
-                (double)v1, (double)v2, (double)sum,
+            pos = m_pos_f;
+            commands_printf("v1=%.3f  v2=%.3f  sum=%.3f  pos=%.3f  fault=%d",
+                (double)v1, (double)v2, (double)sum, (double)pos,
                 (int)m_fault_latched);
         }
     }
+}
+
+static void terminal_cmd_dual_adc_cal(int argc, const char **argv) {
+    float v1  = m_v1;
+    float v2  = m_v2;
+    float sum = m_sum;
+
+    if (argc != 2 ||
+        !(strcmp(argv[1], "left") == 0 || strcmp(argv[1], "mid") == 0 || strcmp(argv[1], "right") == 0)) {
+        commands_printf("No or wrong argument given. Usage: dual_adc_cal left|mid|right ");
+        return;
+    }
+
+    commands_printf("Calibrating %c", argv[1]);
+    commands_printf("  v1:  %.3f V", (double)v1);
+    commands_printf("  v2:  %.3f V", (double)v2);
+    commands_printf("  sum: %.3f V", (double)sum);
+    commands_printf("  fault_latched: %d", m_fault_latched ? 1 : 0);
 }
 
 // ---------------------- App hooks -------------------------------
