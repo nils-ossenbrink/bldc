@@ -100,6 +100,10 @@ void conf_custom_process_cmd(unsigned char *data, unsigned int len,
 	} break;
 
 	case COMM_SET_CUSTOM_CONFIG: {
+		if (len < 2) {
+			break;
+		}
+
 		int conf_ind = data[0];
 		if (m_set_cfg && conf_ind == 0) {
 			m_set_cfg(data + 1);
