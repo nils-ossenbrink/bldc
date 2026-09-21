@@ -74,8 +74,8 @@ static inline int32_t clampi(int32_t v, int32_t lo, int32_t hi) {
 // Magic word identifies a valid / current EEPROM struct version.
 // Change this value whenever persisted layout changes.
 #define DUALADC_CFG_MAGIC   0xDA0C0002u
-#define DUALADC_CAL_VALID_MAGIC 0xDA0CCA1Bu
 #define DUALADC_CAL_VALID_EEPROM_INDEX 13
+#define DUALADC_NEUTRAL_ARM_MS 500
 
 // Runtime / Tool-visible config layout. Order must match XML field order.
 typedef struct {
@@ -101,6 +101,7 @@ typedef struct __attribute__((packed)) {
 
 #define DUALADC_CFG_SERIALIZED_SIZE 48
 #define DUALADC_CFG_FLOAT_SCALE     1000.0f
+#define DUALADC_CAL_SUM_TOL_MIN     0.10f
 
 static const char dualadc_cfg_signature_text[] =
     "v_min18v_center18v_max18deadband18sum_target18sum_tol18"
@@ -122,29 +123,73 @@ static void cfg_load_defaults(dualadc_cfg_t *c) {
     // sum_target ≈ v_min + v_max for truly complementary sensors
     c->sum_target       = 2.92f;
     c->sum_tol          = 0.3f;
-    c->v_margin         = 0.05f;
+    c->v_margin         = 0.1f;
     c->alpha            = 0.12f;
-    c->i_max            = 3.0f;
+    c->i_max            = 10.0f;
     c->brake_on_fault   = 0.0f;
     c->clear_time_ok_ms = 50;
     c->loop_period_ms   = 2;
+}
+
+static bool cfg_values_valid(const dualadc_cfg_t *c) {
+    return isfinite(c->v_min) && isfinite(c->v_center) && isfinite(c->v_max) &&
+            isfinite(c->deadband) && isfinite(c->sum_target) &&
+            isfinite(c->sum_tol) && isfinite(c->v_margin) &&
+            isfinite(c->alpha) && isfinite(c->i_max) &&
+            isfinite(c->brake_on_fault) && c->v_min < c->v_max &&
+            c->v_center >= c->v_min && c->v_center <= c->v_max &&
+            c->sum_target >= 0.0f && c->sum_target <= 6.6f &&
+            c->sum_tol >= 0.0f && c->sum_tol <= 2.0f &&
+            c->v_margin >= 0.0f && c->v_margin <= 0.5f &&
+            c->deadband >= 0.0f && c->deadband <= 0.3f &&
+            c->alpha >= 0.01f && c->alpha <= 1.0f &&
+            c->i_max >= 0.0f && c->i_max <= 300.0f &&
+            c->brake_on_fault == 0.0f && c->clear_time_ok_ms >= 0 &&
+            c->clear_time_ok_ms <= 10000 && c->loop_period_ms >= 1 &&
+            c->loop_period_ms <= 20;
 }
 
 // Mutex protects g_cfg against concurrent access by Tool callback and thread
 static mutex_t      g_cfg_mtx;
 static dualadc_cfg_t g_cfg;
 static volatile bool m_calibration_valid = false;
+static volatile bool m_neutral_arming = false;
+static volatile uint32_t m_neutral_since_ms = 0;
 
-static void calibration_valid_store(bool valid) {
+typedef struct {
+    float v_min;
+    float v_center;
+    float v_max;
+    float sum_target;
+    float v_margin;
+} calibration_config_t;
+
+static uint32_t calibration_config_crc(const dualadc_cfg_t *cfg) {
+    calibration_config_t calibration_cfg = {
+        cfg->v_min,
+        cfg->v_center,
+        cfg->v_max,
+        cfg->sum_target,
+        cfg->v_margin
+    };
+    return utils_crc32c((uint8_t *)&calibration_cfg, sizeof(calibration_cfg));
+}
+
+static uint32_t calibration_config_crc_legacy(const dualadc_cfg_t *cfg) {
+    return utils_crc32c((uint8_t *)cfg, sizeof(*cfg));
+}
+
+static void calibration_valid_store(const dualadc_cfg_t *cfg) {
     eeprom_var value;
-    value.as_u32 = valid ? DUALADC_CAL_VALID_MAGIC : 0u;
+    value.as_u32 = cfg ? calibration_config_crc(cfg) : 0u;
     conf_general_store_eeprom_var_custom(&value, DUALADC_CAL_VALID_EEPROM_INDEX);
 }
 
-static bool calibration_valid_load(void) {
+static bool calibration_valid_load(const dualadc_cfg_t *cfg) {
     eeprom_var value;
     return conf_general_read_eeprom_var_custom(&value, DUALADC_CAL_VALID_EEPROM_INDEX) &&
-            value.as_u32 == DUALADC_CAL_VALID_MAGIC;
+            value.as_u32 != 0u && (value.as_u32 == calibration_config_crc(cfg) ||
+            value.as_u32 == calibration_config_crc_legacy(cfg));
 }
 
 // Safely copy current config into a local snapshot for use inside the thread
@@ -196,7 +241,7 @@ static bool cfg_read_from_eeprom(dualadc_cfg_t *c) {
     dualadc_cfg_store_t tmp;
     memcpy(&tmp, buf, sizeof(dualadc_cfg_store_t));
 
-    if (tmp.magic != DUALADC_CFG_MAGIC) {
+    if (tmp.magic != DUALADC_CFG_MAGIC || !cfg_values_valid(&tmp.cfg)) {
         return false;
     }
 
@@ -254,13 +299,14 @@ static bool my_set_cfg(uint8_t *data) {
     in.loop_period_ms = buffer_get_int32(data, &ind);
 
     // Hard validation – reject nonsensical voltage range
+        if (!cfg_values_valid(&in)) return false;
     if (!(in.v_min < in.v_max))                            return false;
     if (in.v_center < in.v_min || in.v_center > in.v_max) return false;
     if (in.sum_target < 0.0f || in.sum_target > 6.6f)     return false;
     if (in.sum_tol < 0.0f || in.sum_tol > 2.0f)           return false;
     if (in.v_margin < 0.0f || in.v_margin > 0.5f)         return false;
     if (in.i_max < 0.0f || in.i_max > 300.0f)             return false;
-    if (in.brake_on_fault < 0.0f || in.brake_on_fault > 300.0f) return false;
+    if (in.brake_on_fault != 0.0f)                          return false;
 
     in.deadband         = clampf(in.deadband, 0.0f, 0.3f);
     in.alpha            = clampf(in.alpha,    0.01f, 1.0f);
@@ -268,11 +314,26 @@ static bool my_set_cfg(uint8_t *data) {
     in.loop_period_ms   = clampi(in.loop_period_ms,   1,     20);
     in.clear_time_ok_ms = clampi(in.clear_time_ok_ms, 0, 10000);
 
+    dualadc_cfg_t old_cfg;
+    chMtxLock(&g_cfg_mtx);
+    old_cfg = g_cfg;
+    chMtxUnlock(&g_cfg_mtx);
+
+    const bool keep_calibration = m_calibration_valid &&
+            calibration_config_crc(&old_cfg) == calibration_config_crc(&in);
+
     chMtxLock(&g_cfg_mtx);
     g_cfg = in;
     chMtxUnlock(&g_cfg_mtx);
 
     cfg_store_to_eeprom(&in);
+    if (keep_calibration) {
+        calibration_valid_store(&in);
+    } else {
+        calibration_valid_store(NULL);
+        m_calibration_valid = false;
+        m_neutral_arming = false;
+    }
     return true;
 }
 
@@ -385,6 +446,11 @@ static THD_FUNCTION(dual_adc_thread, arg);
 
 static volatile bool     m_running      = false;
 static volatile bool     m_fault_latched = false;
+static volatile uint32_t m_fault_count = 0;
+static volatile uint8_t  m_last_fault_reason = 0;
+static volatile float    m_last_fault_v1 = 0.0f;
+static volatile float    m_last_fault_v2 = 0.0f;
+static volatile float    m_last_fault_sum = 0.0f;
 static volatile float    m_pos_f        = 0.0f;
 static volatile float    m_v1           = 0.0f;
 static volatile float    m_v2           = 0.0f;
@@ -421,15 +487,12 @@ static bool calibration_apply(void) {
                               fmaxf(right->v1, right->v2));
     const float v_center = 0.5f * (mid->v1 + mid->v2);
     const float sum_target = (left->sum + mid->sum + right->sum) / 3.0f;
-    const float sum_min = fminf(fminf(left->sum, mid->sum), right->sum);
-    const float sum_max = fmaxf(fmaxf(left->sum, mid->sum), right->sum);
-    const float sum_deviation = fmaxf(sum_target - sum_min, sum_max - sum_target);
-    const float sum_tol = fmaxf(0.05f, 2.0f * sum_deviation + 0.02f);
+        const float sum_tol = cfg_snapshot().sum_tol;
 
     if (!isfinite(v_min) || !isfinite(v_max) || !isfinite(v_center) ||
             !isfinite(sum_target) || !isfinite(sum_tol) ||
             (v_max - v_min) < 0.2f || v_center < v_min || v_center > v_max ||
-            sum_tol > 2.0f) {
+                sum_tol < 0.0f || sum_tol > 2.0f) {
         return false;
     }
 
@@ -444,8 +507,10 @@ static bool calibration_apply(void) {
     g_cfg = cfg;
     chMtxUnlock(&g_cfg_mtx);
     cfg_store_to_eeprom(&cfg);
-    calibration_valid_store(true);
+    calibration_valid_store(&cfg);
     m_calibration_valid = true;
+    m_neutral_arming = true;
+    m_neutral_since_ms = 0;
 
     commands_printf("Calibration applied: min=%.3f center=%.3f max=%.3f sum=%.3f tol=%.3f",
             (double)cfg.v_min, (double)cfg.v_center, (double)cfg.v_max,
@@ -455,20 +520,22 @@ static bool calibration_apply(void) {
 
 // ---------------------- Logic helpers ---------------------------
 
-static inline bool plaus_ok(float v1, float v2, const dualadc_cfg_t *c) {
+static inline uint8_t plaus_fault_reason(float v1, float v2, const dualadc_cfg_t *c) {
     const float sum = v1 + v2;
     const bool sum_ok = fabsf(sum - c->sum_target) <= c->sum_tol;
     const bool v1_ok  = (v1 >= (c->v_min - c->v_margin)) && (v1 <= (c->v_max + c->v_margin));
     const bool v2_ok  = (v2 >= (c->v_min - c->v_margin)) && (v2 <= (c->v_max + c->v_margin));
-    return (sum_ok && v1_ok && v2_ok);
+    return (uint8_t)((sum_ok ? 0 : 1) | (v1_ok ? 0 : 2) | (v2_ok ? 0 : 4));
+}
+
+static inline bool plaus_ok(float v1, float v2, const dualadc_cfg_t *c) {
+    return plaus_fault_reason(v1, v2, c) == 0;
 }
 
 static void command_stop_fault(const dualadc_cfg_t *c) {
-    if (c->brake_on_fault > 0.0f) {
-        mc_interface_set_brake_current(c->brake_on_fault);
-    } else {
-        mc_interface_set_current(0.0f);
-    }
+    (void)c;
+    m_pos_f = 0.0f;
+    mc_interface_set_current(0.0f);
     m_fault_latched = true;
 }
 
@@ -519,12 +586,30 @@ static THD_FUNCTION(dual_adc_thread, arg) {
         m_v2  = v2;
         m_sum = v1 + v2;
 
-        const bool ok_now = plaus_ok(v1, v2, &c);
+        const uint8_t fault_reason = plaus_fault_reason(v1, v2, &c);
+        const bool ok_now = fault_reason == 0;
 
-        if (!m_calibration_valid || m_calibrating) {
+        if (!m_calibration_valid || m_calibrating || m_neutral_arming) {
+            m_pos_f = 0.0f;
             mc_interface_set_current(0.0f);
+            if (m_calibration_valid && !m_calibrating && ok_now &&
+                    fabsf(norm_pos(v1, v2, &c)) <= fmaxf(c.deadband, 0.05f)) {
+                m_neutral_since_ms += lp;
+                if (m_neutral_since_ms >= DUALADC_NEUTRAL_ARM_MS) {
+                    m_neutral_arming = false;
+                }
+            } else {
+                m_neutral_since_ms = 0;
+            }
         } else if (!ok_now) {
             m_ok_since_ms = 0;
+            if (!m_fault_latched) {
+                m_fault_count++;
+                m_last_fault_reason = fault_reason;
+                m_last_fault_v1 = v1;
+                m_last_fault_v2 = v2;
+                m_last_fault_sum = v1 + v2;
+            }
             command_stop_fault(&c);
         } else {
             if (!m_fault_latched) {
@@ -542,7 +627,6 @@ static THD_FUNCTION(dual_adc_thread, arg) {
                 }
             }
         }
-
         timeout_reset();
 
         ts += MS2ST(lp);
@@ -555,6 +639,7 @@ static THD_FUNCTION(dual_adc_thread, arg) {
 // ---------------------- Terminal commands -----------------------
 
 static void terminal_cmd_dual_adc(int argc, const char **argv) {
+    dualadc_cfg_t c = cfg_snapshot();
     float v1  = m_v1;
     float v2  = m_v2;
     float sum = m_sum;
@@ -567,6 +652,18 @@ static void terminal_cmd_dual_adc(int argc, const char **argv) {
     commands_printf("  pos (filt):    %.3f",   (double)pos);
     commands_printf("  xml_read:      %d", m_custom_xml_read ? 1 : 0);
     commands_printf("  fault_latched: %d", m_fault_latched  ? 1 : 0);
+        commands_printf("  fault_count:   %lu", (unsigned long)m_fault_count);
+        commands_printf("  last_fault:    reason=%u v1=%.3f v2=%.3f sum=%.3f",
+            (unsigned int)m_last_fault_reason, (double)m_last_fault_v1,
+            (double)m_last_fault_v2, (double)m_last_fault_sum);
+        commands_printf("  limits: min=%.3f max=%.3f sum=%.3f tol=%.3f margin=%.3f",
+            (double)c.v_min, (double)c.v_max, (double)c.sum_target,
+            (double)c.sum_tol, (double)c.v_margin);
+        commands_printf("  plaus: sum=%d v1=%d v2=%d valid=%d arming=%d",
+            fabsf(v1 + v2 - c.sum_target) <= c.sum_tol,
+            v1 >= c.v_min - c.v_margin && v1 <= c.v_max + c.v_margin,
+            v2 >= c.v_min - c.v_margin && v2 <= c.v_max + c.v_margin,
+            m_calibration_valid ? 1 : 0, m_neutral_arming ? 1 : 0);
 
     if (argc >= 2 && strcmp(argv[1], "stream") == 0) {
         int loops = 100;
@@ -580,9 +677,10 @@ static void terminal_cmd_dual_adc(int argc, const char **argv) {
         commands_printf("Streaming %d iterations at 10 Hz...", loops);
         for (int i = 0; i < loops; i++) {
             chThdSleepMilliseconds(100);
-            commands_printf("v1=%.3f  v2=%.3f  sum=%.3f  pos=%.3f  fault=%d",
+            commands_printf("v1=%.3f  v2=%.3f  sum=%.3f  pos=%.3f  fault=%d last_reason=%u",
                 (double)m_v1, (double)m_v2, (double)m_sum,
-                (double)m_pos_f, (int)m_fault_latched);
+                (double)m_pos_f, (int)m_fault_latched,
+                (unsigned int)m_last_fault_reason);
         }
     }
 }
@@ -597,8 +695,9 @@ static void terminal_cmd_dual_adc_cal(int argc, const char **argv) {
 
     if (strcmp(argument, "reset") == 0) {
         calibration_reset();
-        calibration_valid_store(false);
+        calibration_valid_store(NULL);
         m_calibration_valid = false;
+        m_neutral_arming = false;
         commands_printf("Calibration reset");
         return;
     }
@@ -626,9 +725,20 @@ static void terminal_cmd_dual_adc_cal(int argc, const char **argv) {
     }
 
     m_calibrating = true;
-    m_calibration[point].v1 = m_v1;
-    m_calibration[point].v2 = m_v2;
-    m_calibration[point].sum = m_sum;
+    calibration_valid_store(NULL);
+    m_calibration_valid = false;
+    m_neutral_arming = false;
+
+    float capture_v1 = 0.0f;
+    float capture_v2 = 0.0f;
+    for (int i = 0; i < 16; i++) {
+        chThdSleepMilliseconds(2);
+        capture_v1 += m_v1;
+        capture_v2 += m_v2;
+    }
+    m_calibration[point].v1 = capture_v1 / 16.0f;
+    m_calibration[point].v2 = capture_v2 / 16.0f;
+    m_calibration[point].sum = m_calibration[point].v1 + m_calibration[point].v2;
     m_calibration[point].valid = true;
 
     commands_printf("Captured %s: v1=%.3f v2=%.3f sum=%.3f", argument,
@@ -660,13 +770,16 @@ void app_custom_start(void) {
     m_fault_latched = false;
     m_pos_f         = 0.0f;
     m_ok_since_ms   = 0;
-    m_calibration_valid = calibration_valid_load();
 
     // Load config from EEPROM; fall back to defaults if not found / version mismatch
     if (!cfg_read_from_eeprom(&g_cfg)) {
         cfg_load_defaults(&g_cfg);
+        calibration_valid_store(NULL);
         cfg_store_to_eeprom(&g_cfg);
     }
+    m_calibration_valid = calibration_valid_load(&g_cfg);
+    m_neutral_arming = m_calibration_valid;
+    m_neutral_since_ms = 0;
 
     conf_custom_add_config(my_get_cfg, my_set_cfg, my_get_cfg_xml);
 

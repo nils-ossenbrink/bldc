@@ -388,7 +388,11 @@ int main(void) {
 	chThdCreateStatic(flash_integrity_check_thread_wa, sizeof(flash_integrity_check_thread_wa), LOWPRIO, flash_integrity_check_thread, NULL);
 
 	timeout_init();
-	timeout_configure(appconf->timeout_msec, appconf->timeout_brake_current, appconf->kill_sw_mode);
+	if (appconf->app_to_use == APP_CUSTOM) {
+		timeout_configure(appconf->timeout_msec, 0.0f, appconf->kill_sw_mode);
+	} else {
+		timeout_configure(appconf->timeout_msec, appconf->timeout_brake_current, appconf->kill_sw_mode);
+	}
 
 #if HAS_BLACKMAGIC
 	bm_init();

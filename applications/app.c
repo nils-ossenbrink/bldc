@@ -30,6 +30,7 @@
 #include "crc.h"
 #include "pwm_servo.h"
 #include "servo_dec.h"
+#include "timeout.h"
 
 // Private variables
 static app_configuration appconf = {0};
@@ -58,6 +59,10 @@ void app_set_configuration(app_configuration *conf) {
 	}
 
 	appconf = *conf;
+
+	if (appconf.app_to_use == APP_CUSTOM) {
+		timeout_configure(appconf.timeout_msec, 0.0f, appconf.kill_sw_mode);
+	}
 
 	if (app_changed) {
 		app_ppm_stop();
