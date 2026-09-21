@@ -100,13 +100,15 @@ void conf_custom_process_cmd(unsigned char *data, unsigned int len,
 	} break;
 
 	case COMM_SET_CUSTOM_CONFIG: {
-		if (len < 2) {
+		if (len < 53) {
 			break;
 		}
 
 		int conf_ind = data[0];
 		if (m_set_cfg && conf_ind == 0) {
-			m_set_cfg(data + 1);
+			if (!m_set_cfg(data + 1)) {
+				break;
+			}
 			int32_t ind = 0;
 			uint8_t send_buffer[50];
 			send_buffer[ind++] = packet_id;
